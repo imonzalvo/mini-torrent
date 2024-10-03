@@ -541,6 +541,7 @@ dependencies = [
  "reqwest",
  "sha1",
  "tokio",
+ "url",
  "urlencoding",
 ]
 
