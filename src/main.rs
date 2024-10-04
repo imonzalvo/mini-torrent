@@ -11,7 +11,6 @@ use message::read_message;
 use message::send_message;
 use message::PeerMessage;
 use rand::Rng;
-use tracker::{Tracker, factory};
 use std::env;
 use std::fs;
 use std::net::Ipv4Addr;
@@ -20,6 +19,7 @@ use tokio::net::TcpStream;
 use torrent_file::TorrentFile;
 use torrent_state::PeerState;
 use torrent_state::TorrentState;
+use tracker::{factory, Tracker};
 
 #[derive(Debug, Clone, Copy)]
 struct Peer {
@@ -238,7 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         torrent_file.info.length as u64,
         pieces_hashes,
     )?;
-    let tracker: Box<dyn Tracker> = factory::create_tracker(&torrent_file.announce, &torrent_file);
+    let tracker: Box<dyn Tracker> = factory::create_tracker(&torrent_file);
 
     println!("\nContacting tracker...");
     match tracker.get_peers().await {

@@ -2,7 +2,7 @@ pub mod factory;
 mod http;
 mod udp;
 
-use crate::{torrent_file::TorrentFile, Peer};
+use crate::{Peer};
 use async_trait::async_trait;
 use rand::Rng;
 use std::error::Error;
@@ -15,11 +15,6 @@ pub trait Tracker {
 }
 
 pub struct TrackerInfo {
-    pub peers: Vec<Peer>,
-    pub interval: i64,
-}
-
-struct TrackerResponse {
     pub peers: Vec<Peer>,
     pub interval: i64,
 }

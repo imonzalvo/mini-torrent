@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 pub struct HttpTracker<'a> {
-    pub announce_url: String,
     pub torrent_file: &'a TorrentFile,
 }
 
@@ -21,7 +20,7 @@ impl<'a> Tracker for HttpTracker<'a> {
 
         let url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&left={}&compact=1",
-            self.announce_url, info_hash, binary_peer_id, port, self.torrent_file.info.length
+            self.torrent_file.announce, info_hash, binary_peer_id, port, self.torrent_file.info.length
         );
 
         println!("Calling HTTP URL {}", url);

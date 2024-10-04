@@ -8,7 +8,6 @@ use tokio::net::UdpSocket;
 use url::Url;
 
 pub struct UdpTracker<'a> {
-    pub announce_url: String,
     pub torrent_file: &'a TorrentFile,
 }
 
@@ -17,7 +16,7 @@ impl<'a> Tracker for UdpTracker<'a> {
     async fn get_peers(&self) -> Result<TrackerInfo, Box<dyn Error>> {
         let peer_id = generate_peer_id();
 
-        let url = Url::parse(&self.announce_url)?;
+        let url = Url::parse(&self.torrent_file.announce)?;
         let host = url.host_str().ok_or("Invalid host in announce URL")?;
         let port = url.port().unwrap_or(80);
 
