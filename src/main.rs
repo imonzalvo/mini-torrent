@@ -238,10 +238,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         torrent_file.info.length as u64,
         pieces_hashes,
     )?;
-    let tracker: Box<dyn Tracker> = factory::create_tracker(&torrent_file.announce);
+    let tracker: Box<dyn Tracker> = factory::create_tracker(&torrent_file.announce, &torrent_file);
 
     println!("\nContacting tracker...");
-    match tracker.get_peers(&torrent_file).await {
+    match tracker.get_peers().await {
         Ok(tracker_info) => {
             println!("Received {} peers from tracker:", tracker_info.peers.len());
             let peer_id = generate_peer_id(); // Generate a unique peer_id for the handshake

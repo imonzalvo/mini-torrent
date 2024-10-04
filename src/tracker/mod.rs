@@ -10,8 +10,7 @@ use std::error::Error;
 #[async_trait]
 pub trait Tracker {
     async fn get_peers(
-        &self,
-        torrent: &TorrentFile
+        &self
     ) -> Result<TrackerInfo, Box<dyn Error>>;
 }
 

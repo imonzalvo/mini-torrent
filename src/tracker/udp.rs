@@ -7,15 +7,16 @@ use rand::Rng;
 use tokio::net::UdpSocket;
 use url::Url;
 
-pub struct UdpTracker {
+pub struct UdpTracker<'a> {
     pub announce_url: String,
+    pub torrent_file: &'a TorrentFile,
 }
 
 #[async_trait]
-impl Tracker for UdpTracker {
-    async fn get_peers(&self, torrent: &TorrentFile) -> Result<TrackerInfo, Box<dyn Error>> {
+impl<'a> Tracker for UdpTracker<'a> {
+    async fn get_peers(&self) -> Result<TrackerInfo, Box<dyn Error>> {
         let peer_id = generate_peer_id();
-        
+
         let url = Url::parse(&self.announce_url)?;
         let host = url.host_str().ok_or("Invalid host in announce URL")?;
         let port = url.port().unwrap_or(80);
@@ -24,28 +25,24 @@ impl Tracker for UdpTracker {
 
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         let addr = format!("{}:{}", host, port);
-        println!("here");
 
         socket.connect(&addr).await?;
-        println!("here1");
 
         // Step 1: Connection request
         let connection_id = send_connection_request(&socket).await?;
-        println!("here2");
 
         // Step 2: Announce request
         let transaction_id: u32 = rand::thread_rng().gen();
         let announce_request = create_announce_request(
             connection_id,
             transaction_id,
-            &torrent.info_hash,
+            &self.torrent_file.info_hash,
             &peer_id,
-            0,                                       // downloaded
-            torrent.info.length.try_into().unwrap(), // left
-            0,                                       // uploaded
+            0,                                                 // downloaded
+            self.torrent_file.info.length.try_into().unwrap(), // left
+            0,                                                 // uploaded
             port,
         );
-        println!("here3");
 
         socket.send(&announce_request).await?;
 
@@ -71,10 +68,8 @@ async fn send_connection_request(socket: &UdpSocket) -> Result<u64, Box<dyn std:
 
     socket.send(&request).await?;
 
-    println!("here 21");
     let mut response = vec![0u8; 16];
     socket.recv(&mut response).await?;
-    println!("here 22");
 
     let action = u32::from_be_bytes([response[0], response[1], response[2], response[3]]);
     if action != 0 {

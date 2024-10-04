@@ -5,25 +5,23 @@ use crate::{bencode_parser::{parse_bencode, BencodeValue}, torrent_file::Torrent
 use async_trait::async_trait;
 use reqwest::Client;
 
-pub struct HttpTracker {
+pub struct HttpTracker<'a> {
     pub announce_url: String,
+    pub torrent_file: &'a TorrentFile,
 }
 
 #[async_trait]
-impl Tracker for HttpTracker {
-    async fn get_peers(
-        &self,
-        torrent: &TorrentFile
-    ) -> Result<TrackerInfo, Box<dyn Error>> {
+impl<'a> Tracker for HttpTracker<'a> {
+    async fn get_peers(&self) -> Result<TrackerInfo, Box<dyn Error>> {
         let peer_id = generate_peer_id();
         let port = 6881;
 
-        let info_hash = urlencoding::encode_binary(&torrent.info_hash);
+        let info_hash = urlencoding::encode_binary(&self.torrent_file.info_hash);
         let binary_peer_id = urlencoding::encode_binary(&peer_id);
 
         let url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&left={}&compact=1",
-            self.announce_url, info_hash, binary_peer_id, port, torrent.info.length
+            self.announce_url, info_hash, binary_peer_id, port, self.torrent_file.info.length
         );
 
         println!("Calling HTTP URL {}", url);
