@@ -2,6 +2,7 @@ use crate::Peer;
 use sha1::{Digest, Sha1};
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
+use std::net::TcpStream;
 
 #[derive(Debug)]
 pub struct TorrentState {
@@ -104,6 +105,7 @@ pub struct PeerState {
     pub am_interested: bool,
     pub peer_choking: bool,
     pub peer_interested: bool,
+    connection: Option<TcpStream>
 }
 
 impl PeerState {
@@ -116,6 +118,7 @@ impl PeerState {
             am_interested: false,
             peer_choking: true,
             peer_interested: false,
+            connection: None
         }
     }
 
