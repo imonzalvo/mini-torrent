@@ -1,21 +1,35 @@
 use crate::Peer;
+use std::fs::File;
+use std::io::{self, Seek, SeekFrom, Write};
 
 #[derive(Debug)]
 pub struct TorrentState {
-    pub peers: Vec<PeerState>, // List of peers we have completed handshakes with
-    pub downloaded_pieces: Vec<bool>, // A bitfield representing which pieces we've downloaded
+    pub peers: Vec<PeerState>,
+    pub downloaded_pieces: Vec<bool>,
     pub piece_size: usize,
     pub total_pieces: usize,
+    pub file: File,
+    pub total_length: u64,
 }
 
 impl TorrentState {
-    pub fn new(piece_count: usize, piece_size: usize) -> Self {
-        Self {
+    pub fn new(
+        piece_count: usize,
+        piece_size: usize,
+        file_path: &str,
+        total_length: u64,
+    ) -> io::Result<Self> {
+        let file = File::create(file_path)?;
+        file.set_len(total_length)?;
+
+        Ok(Self {
             peers: Vec::new(),
             downloaded_pieces: vec![false; piece_count],
             piece_size,
             total_pieces: piece_count,
-        }
+            file,
+            total_length,
+        })
     }
 
     pub fn mark_piece_downloaded(&mut self, piece_index: usize) {
@@ -41,7 +55,7 @@ impl TorrentState {
         self.peers.iter().find(|peer| peer.has_piece(piece_index))
     }
 
-    pub fn print_downloaded_pieces(&self) -> () {
+    pub fn print_downloaded_pieces(&self) {
         let pieces: Vec<char> = self
             .downloaded_pieces
             .iter()
@@ -49,8 +63,19 @@ impl TorrentState {
             .collect();
         println!("[{}]", pieces.into_iter().collect::<String>());
     }
-}
 
+    pub fn write_piece(&mut self, piece_index: usize, data: &[u8]) -> io::Result<()> {
+        let offset = piece_index * self.piece_size;
+        self.file.seek(SeekFrom::Start(offset as u64))?;
+        self.file.write_all(data)?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    pub fn is_download_complete(&self) -> bool {
+        self.downloaded_pieces.iter().all(|&piece| piece)
+    }
+}
 #[derive(Debug)]
 pub struct PeerState {
     pub peer: Peer,

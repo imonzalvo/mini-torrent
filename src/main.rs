@@ -396,28 +396,50 @@ async fn download_piece(
     stream: &mut TcpStream,
     torrent_state: &mut TorrentState,
     piece_index: usize,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let piece_size = torrent_state.piece_size;
-    let mut piece_data = Vec::new();
+) -> Result<(), Box<dyn std::error::Error>> {
+    let piece_size = if piece_index == torrent_state.total_pieces - 1 {
+        // For the last piece, calculate its size based on total length
+        (torrent_state.total_length as usize) - (piece_index * torrent_state.piece_size)
+    } else {
+        torrent_state.piece_size
+    };
 
-    for block_index in 0..(piece_size / 16384) {
+    let mut piece_data = Vec::with_capacity(piece_size);
+
+    for block_index in 0..((piece_size + 16383) / 16384) {
+        // Round up division
         let begin = block_index * 16384;
         let length = std::cmp::min(16384, piece_size - begin);
 
         request_piece(stream, piece_index, begin as u32, length as u32).await?;
 
-        match read_message(stream).await? {
-            PeerMessage::Piece {
-                index,
-                begin,
-                block,
-            } => {
-                if index as usize != piece_index || begin as usize != block_index * 16384 {
-                    return Err("Received incorrect piece data".into());
+        // Keep reading messages until we receive a valid piece message
+        loop {
+            match read_message(stream).await? {
+                PeerMessage::Piece {
+                    index,
+                    begin,
+                    block,
+                } => {
+                    // Ensure the received piece is correct
+                    if index as usize == piece_index && begin as usize == block_index * 16384 {
+                        piece_data.extend_from_slice(&block);
+                        break; // Exit the loop once we have the valid piece
+                    } else {
+                        return Err("Received incorrect piece data".into());
+                    }
                 }
-                piece_data.extend_from_slice(&block);
+                PeerMessage::Unchoke => {
+                    println!("Received Unchoke message, ignoring during piece download.");
+                    // Ignore, as we don't need to act on this while downloading
+                    continue; // Wait for the correct Piece message
+                }
+                m => {
+                    // Handle any unexpected messages
+                    println!("Unexpected message: {:?}", m);
+                    return Err("Unexpected message while downloading piece".into());
+                }
             }
-            _ => return Err("Unexpected message while downloading piece".into()),
         }
     }
 
@@ -425,8 +447,9 @@ async fn download_piece(
         return Err("Incomplete piece data".into());
     }
 
+    torrent_state.write_piece(piece_index, &piece_data)?;
     torrent_state.mark_piece_downloaded(piece_index);
-    Ok(piece_data)
+    Ok(())
 }
 
 async fn download_from_peer(
@@ -459,15 +482,30 @@ async fn download_from_peer(
     }
 
     while let Some(missing_piece) = torrent_state.get_missing_piece() {
+        println!("Torrent Peers {:?}", torrent_state.peers.len());
         let peer_state = torrent_state
             .find_peer_with_piece(missing_piece)
             .ok_or("No peer has the missing piece")?;
 
-        // println!("Got peer {:?}", peer_state);
+        println!("Got peer {:?}", peer_state.peer_choking);
 
         if peer_state.peer_choking {
+            match read_message(&mut stream).await? {
+                PeerMessage::Unchoke => {
+                    println!("Peer has unchoked us. We can now request pieces.");
+                    let peer_state = torrent_state.peers.first_mut().unwrap();
+                    peer_state.peer_choking = false;
+                    break;
+                }
+                PeerMessage::Bitfield(bitfield) => {
+                    let peer_state = torrent_state.peers.last_mut().unwrap();
+                    peer_state.update_bitfield(bitfield, torrent_state.total_pieces);
+                }
+                m => {
+                    println!("Wtfffff {:?}", m)
+                } // Ignore other messages for now
+            }
             // println!("Waiting for peer to unchoke us...");
-
             continue;
         }
 
@@ -478,13 +516,14 @@ async fn download_from_peer(
 
         // Here you would typically write the piece data to a file or buffer
         // For now, we'll just print the length of the downloaded data
-        println!(
-            "Downloaded {} bytes for piece {}",
-            piece_data.len(),
-            missing_piece
-        );
+        // println!(
+        //     "Downloaded {} bytes for piece {}",
+        //     piece_data.len(),
+        //     missing_piece
+        // );
     }
 
+    println!("Leaving");
     Ok(())
 }
 
@@ -511,12 +550,14 @@ async fn request_piece(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: {} <torrent_file>", args[0]);
+    if args.len() != 3 {
+        eprintln!("Usage: {} <torrent_file> <output_file>", args[0]);
         std::process::exit(1);
     }
 
     let torrent_path = &args[1];
+    let output_path = &args[2];
+
     let torrent_data = fs::read(torrent_path)?;
     let torrent_file = parse_torrent_file(&torrent_data)?;
 
@@ -529,8 +570,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Info Hash: {}", hex::encode(torrent_file.info_hash));
 
     let piece_count = torrent_file.info.pieces.len() / 20; // Each SHA-1 hash is 20 bytes
-    let mut torrent_state = TorrentState::new(piece_count, torrent_file.info.piece_length as usize);
-
+    let mut torrent_state = TorrentState::new(
+        piece_count,
+        torrent_file.info.piece_length as usize,
+        output_path,
+        torrent_file.info.length as u64,
+    )?;
     println!("\nContacting tracker...");
     match get_peers(&torrent_file).await {
         Ok(tracker_info) => {
@@ -556,6 +601,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .await
                         {
                             eprintln!("Error downloading from peer: {}", e);
+                            torrent_state.peers.clear();
+                        } else {
+                            return Ok(());
                         }
                     }
                     Err(e) => {
