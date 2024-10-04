@@ -16,7 +16,7 @@ impl Tracker for UdpTracker {
     async fn get_peers(&self, torrent: &TorrentFile) -> Result<TrackerInfo, Box<dyn Error>> {
         let peer_id = generate_peer_id();
         
-        let url = Url::parse(&torrent.announce)?;
+        let url = Url::parse(&self.announce_url)?;
         let host = url.host_str().ok_or("Invalid host in announce URL")?;
         let port = url.port().unwrap_or(80);
 

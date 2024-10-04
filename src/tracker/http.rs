@@ -23,7 +23,7 @@ impl Tracker for HttpTracker {
 
         let url = format!(
             "{}?info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&left={}&compact=1",
-            torrent.announce, info_hash, binary_peer_id, port, torrent.info.length
+            self.announce_url, info_hash, binary_peer_id, port, torrent.info.length
         );
 
         println!("Calling HTTP URL {}", url);
