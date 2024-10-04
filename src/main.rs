@@ -447,6 +447,7 @@ async fn download_piece(
         return Err("Incomplete piece data".into());
     }
 
+    torrent_state.verify_piece(piece_index, &piece_data);
     torrent_state.write_piece(piece_index, &piece_data)?;
     torrent_state.mark_piece_downloaded(piece_index);
     Ok(())
@@ -512,6 +513,8 @@ async fn download_from_peer(
         println!("Downloading piece {}", missing_piece);
         let piece_data = download_piece(&mut stream, torrent_state, missing_piece).await?;
         torrent_state.print_downloaded_pieces();
+        let have_message = PeerMessage::Have(missing_piece as u32);
+        send_message(&mut stream, have_message).await?;
         println!("Successfully downloaded piece {}", missing_piece);
 
         // Here you would typically write the piece data to a file or buffer
@@ -570,11 +573,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Info Hash: {}", hex::encode(torrent_file.info_hash));
 
     let piece_count = torrent_file.info.pieces.len() / 20; // Each SHA-1 hash is 20 bytes
+    let pieces_hashes = torrent_file
+        .info
+        .pieces
+        .chunks(20)
+        .filter_map(|chunk| chunk.try_into().ok())
+        .collect();
+
     let mut torrent_state = TorrentState::new(
         piece_count,
         torrent_file.info.piece_length as usize,
         output_path,
         torrent_file.info.length as u64,
+        pieces_hashes,
     )?;
     println!("\nContacting tracker...");
     match get_peers(&torrent_file).await {

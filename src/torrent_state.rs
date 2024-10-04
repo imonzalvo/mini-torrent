@@ -1,4 +1,5 @@
 use crate::Peer;
+use sha1::{Digest, Sha1};
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 
@@ -10,6 +11,7 @@ pub struct TorrentState {
     pub total_pieces: usize,
     pub file: File,
     pub total_length: u64,
+    pub pieces_hashes: Vec<[u8; 20]>,
 }
 
 impl TorrentState {
@@ -18,6 +20,7 @@ impl TorrentState {
         piece_size: usize,
         file_path: &str,
         total_length: u64,
+        pieces_hashes: Vec<[u8; 20]>,
     ) -> io::Result<Self> {
         let file = File::create(file_path)?;
         file.set_len(total_length)?;
@@ -29,7 +32,23 @@ impl TorrentState {
             total_pieces: piece_count,
             file,
             total_length,
+            pieces_hashes,
         })
+    }
+
+    pub fn verify_piece(&self, piece_index: usize, piece_data: &[u8]) -> bool {
+        // Calculate the SHA-1 hash of the piece data
+        let mut hasher = Sha1::new();
+
+        hasher.update(piece_data);
+        let result = hasher.finalize();
+
+        // Compare the calculated hash with the expected hash from the torrent file
+        if let Some(expected_hash) = self.pieces_hashes.get(piece_index) {
+            result.as_slice() == expected_hash
+        } else {
+            false
+        }
     }
 
     pub fn mark_piece_downloaded(&mut self, piece_index: usize) {
