@@ -27,20 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{}", torrent_file);
 
-    let piece_count = torrent_file.info.pieces.len() / 20; // Each SHA-1 hash is 20 bytes
-    let pieces_hashes = torrent_file
-        .info
-        .pieces
-        .chunks(20)
-        .filter_map(|chunk| chunk.try_into().ok())
-        .collect();
-
     let mut torrent_state = TorrentState::new(
-        piece_count,
+        torrent_file.get_piece_count(),
         torrent_file.info.piece_length as usize,
         output_path,
         torrent_file.info.length as u64,
-        pieces_hashes,
+        torrent_file.get_pieces_hashes(),
         torrent_file.info_hash
     )?;
     let tracker: Box<dyn Tracker> = factory::create_tracker(&torrent_file);

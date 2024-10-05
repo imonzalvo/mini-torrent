@@ -43,6 +43,18 @@ impl TorrentFile {
         })
     }
 
+    pub fn get_piece_count(&self) -> usize {
+        self.info.pieces.len() / 20
+    }
+
+    pub fn get_pieces_hashes(&self) -> Vec<[u8;20]>{
+        self.info
+        .pieces
+        .chunks(20)
+        .filter_map(|chunk| chunk.try_into().ok())
+        .collect()
+    }
+
     fn extract_string(dict: &HashMap<String, BencodeValue>, key: &str) -> Result<String, String> {
         match dict.get(key) {
             Some(BencodeValue::ByteString(bytes)) => String::from_utf8(bytes.clone())
