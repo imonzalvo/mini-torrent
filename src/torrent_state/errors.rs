@@ -1,8 +1,13 @@
 use std::net::SocketAddr;
 use thiserror::Error;
 
+use super::peer::Peer;
+
 #[derive(Error, Debug)]
 pub enum TorrentError {
+    #[error("Failed to connect to peer {0}")]
+    PeerConnectionFailed(Peer),
+
     #[error("Failed to connect to {0}: {1}")]
     ConnectionFailed(SocketAddr, String),
 

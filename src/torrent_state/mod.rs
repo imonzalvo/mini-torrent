@@ -2,26 +2,31 @@ mod errors;
 pub mod peer;
 mod piece;
 
+use futures::future::join_all;
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use errors::TorrentError;
 use peer::{Peer, PeerState};
 use piece::PieceManager;
 use tokio::net::TcpStream;
-use tokio::time::timeout;
+use tokio::sync::{mpsc, Mutex};
+use tokio::task;
+use tokio::time::{interval, timeout};
 
 use crate::handshake::{receive_handshake, send_handshake};
 use crate::message::{read_message, send_message, PeerMessage};
 use crate::tracker::generate_peer_id;
 
 pub struct TorrentState {
-    peers: Vec<PeerState>,
-    piece_manager: PieceManager,
-    file: File,
+    piece_manager: Arc<Mutex<PieceManager>>,
+    file: Arc<Mutex<File>>,
     info_hash: [u8; 20],
+    download_complete: Arc<AtomicBool>,
 }
 
 impl TorrentState {
@@ -37,39 +42,71 @@ impl TorrentState {
         file.set_len(total_length)?;
 
         Ok(Self {
-            peers: Vec::new(),
-            piece_manager: PieceManager::new(piece_count, piece_size, pieces_hashes, total_length),
-            file,
+            piece_manager: Arc::new(Mutex::new(PieceManager::new(
+                piece_count,
+                piece_size,
+                pieces_hashes,
+                total_length,
+            ))),
+            file: Arc::new(Mutex::new(file)),
             info_hash,
+            download_complete: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    pub async fn connect_and_download(&mut self, peers: Vec<Peer>) -> Result<(), TorrentError> {
-        for peer in peers {
-            match self.connect_to_peer(&peer, Duration::from_secs(3)).await {
-                Ok(stream) => {
-                    println!("Successfully connected to peer {}", peer);
-                    let mut peer_state = PeerState::new(peer);
-                    peer_state.set_handshaked(true);
-                    self.peers.push(peer_state);
+    pub async fn connect_and_download(&self, peers: Vec<Peer>) -> Result<(), TorrentError> {
+        let (tx, mut rx) = mpsc::channel(100);
 
-                    if let Err(e) = self.download_from_peer(stream).await {
-                        eprintln!("Error downloading from peer: {}", e);
-                        self.peers.pop(); // Remove the failed peer
-                    } else {
-                        return Ok(());
+        let handles: Vec<_> = peers
+            .into_iter()
+            .map(|peer| {
+                let piece_manager = Arc::clone(&self.piece_manager);
+                let file = Arc::clone(&self.file);
+                let info_hash = self.info_hash;
+                let download_complete = Arc::clone(&self.download_complete);
+                let tx = tx.clone();
+
+                task::spawn(async move {
+                    println!("new task spawn for {:?}", peer.ip);
+                    Self::download_from_peer(
+                        peer,
+                        piece_manager,
+                        file,
+                        info_hash,
+                        download_complete,
+                        tx,
+                    )
+                    .await
+                })
+            })
+            .collect();
+
+        let mut interval = interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if self.download_complete.load(Ordering::Relaxed) {
+                        println!("Download complete. Stopping all connections.");
+                        break;
                     }
                 }
-                Err(e) => {
-                    println!("Failed to connect to peer {}: {}", peer, e);
+                Some(_) = rx.recv() => {
+                    if self.is_download_complete().await {
+                        self.download_complete.store(true, Ordering::Relaxed);
+                    }
                 }
             }
         }
-        Err(TorrentError::NoPeersAvailable)
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        Ok(())
     }
 
     async fn connect_to_peer(
-        &self,
         peer: &Peer,
         timeout_duration: Duration,
     ) -> Result<TcpStream, TorrentError> {
@@ -84,47 +121,97 @@ impl TorrentState {
         }
     }
 
-    async fn download_from_peer(&mut self, mut stream: TcpStream) -> Result<(), TorrentError> {
+    async fn download_from_peer(
+        peer: Peer,
+        piece_manager: Arc<Mutex<PieceManager>>,
+        file: Arc<Mutex<File>>,
+        info_hash: [u8; 20],
+        download_complete: Arc<AtomicBool>,
+        tx: mpsc::Sender<()>,
+    ) -> Result<(), TorrentError> {
+        let mut stream = match Self::connect_to_peer(&peer, Duration::from_secs(3)).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                println!("Failed to connect to peer {}: {}", peer, e);
+                return Err(e);
+            }
+        };
+
+        println!("Successfully connected to peer {}", peer);
         let peer_id = generate_peer_id();
 
-        send_handshake(&mut stream, self.info_hash, peer_id).await?;
-        receive_handshake(&mut stream, self.info_hash).await?;
+        send_handshake(&mut stream, info_hash, peer_id).await?;
+        receive_handshake(&mut stream, info_hash).await?;
 
         send_message(&mut stream, PeerMessage::Unchoke).await?;
         send_message(&mut stream, PeerMessage::Interested).await?;
 
-        self.handle_initial_messages(&mut stream).await?;
+        Self::handle_initial_messages(&mut stream).await?;
 
-        while let Some(missing_piece) = self.piece_manager.get_missing_piece() {
-            self.download_piece(&mut stream, missing_piece).await?;
-            self.piece_manager.print_downloaded_pieces();
+        loop {
+            if download_complete.load(Ordering::Relaxed) {
+                println!(
+                    "Download complete signal received. Closing connection with peer {}.",
+                    peer
+                );
+                break;
+            }
+
+            let missing_piece_index = {
+                let piece_manager = piece_manager.lock().await;
+                let piece = piece_manager.get_missing_piece();
+                if piece.is_none() {
+                    println!("No more pieces to download from peer {}", peer);
+                    break;
+                }
+                piece_manager.mark_piece_downloaded(piece.unwrap());
+                println!("Inside lock: Missing piece: {:?}", piece);
+                piece.unwrap()
+            };
+
+            match Self::download_piece(&mut stream, missing_piece_index, &piece_manager, &file)
+                .await
+            {
+                Ok(()) => {
+                    let piece_managed_locked = piece_manager.lock().await;
+                    // piece_manager.mark_piece_downloaded(missing_piece_index);
+                    tx.send(())
+                        .await
+                        .expect("Failed to send piece completion signal");
+                    println!(
+                        "Successfully downloaded piece {} from peer {}",
+                        missing_piece_index, peer
+                    );
+                    piece_managed_locked.print_downloaded_pieces();
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Error downloading piece {} from peer {}: {}",
+                        missing_piece_index, peer, e
+                    );
+                    let mut piece_manager = piece_manager.lock().await;
+                    piece_manager.mark_piece_not_downloaded(missing_piece_index);
+                }
+            }
         }
 
-        println!("Download complete");
         Ok(())
     }
 
-    async fn handle_initial_messages(
-        &mut self,
-        stream: &mut TcpStream,
-    ) -> Result<(), TorrentError> {
+    async fn is_download_complete(&self) -> bool {
+        let piece_manager = self.piece_manager.lock().await;
+        piece_manager.all_pieces_downloaded()
+    }
+
+    async fn handle_initial_messages(stream: &mut TcpStream) -> Result<(), TorrentError> {
         loop {
             match read_message(stream).await? {
                 PeerMessage::Unchoke => {
                     println!("Peer has unchoked us. We can now request pieces.");
-                    let peer_state = self
-                        .peers
-                        .first_mut()
-                        .ok_or(TorrentError::NoPeersAvailable)?;
-                    peer_state.set_peer_choking(false);
                     break;
                 }
-                PeerMessage::Bitfield(bitfield) => {
-                    let peer_state = self
-                        .peers
-                        .last_mut()
-                        .ok_or(TorrentError::NoPeersAvailable)?;
-                    peer_state.update_bitfield(bitfield, self.piece_manager.total_pieces());
+                PeerMessage::Bitfield(_) => {
+                    // We're not using the bitfield for now, but we could store it if needed
                 }
                 _ => {} // Ignore other messages for now
             }
@@ -133,23 +220,26 @@ impl TorrentState {
     }
 
     async fn download_piece(
-        &mut self,
         stream: &mut TcpStream,
         piece_index: usize,
+        piece_manager: &Arc<Mutex<PieceManager>>,
+        file: &Arc<Mutex<File>>,
     ) -> Result<(), TorrentError> {
         let (piece_size, num_blocks) = {
-            let piece = self.piece_manager.get_piece(piece_index)?;
+            let piece_manager = piece_manager.lock().await;
+            let piece = piece_manager.get_piece(piece_index)?;
             (piece.size(), piece.num_blocks())
         };
+
         let mut piece_data = Vec::with_capacity(piece_size);
 
         for block_index in 0..num_blocks {
             let (begin, length) = {
-                let piece = self.piece_manager.get_piece(piece_index)?;
+                let piece_manager = piece_manager.lock().await;
+                let piece = piece_manager.get_piece(piece_index)?;
                 piece.block_info(block_index)
             };
-            self.request_piece(stream, piece_index, begin, length)
-                .await?;
+            Self::request_piece(stream, piece_index, begin, length).await?;
 
             loop {
                 match read_message(stream).await? {
@@ -171,22 +261,27 @@ impl TorrentState {
             }
         }
 
-        if !self.piece_manager.verify_piece(piece_index, &piece_data) {
+        let piece_valid = {
+            let piece_manager = piece_manager.lock().await;
+            piece_manager.verify_piece(piece_index, &piece_data)
+        };
+
+        if !piece_valid {
             return Err(TorrentError::PieceVerificationFailed(piece_index));
         }
 
-        self.write_piece(piece_index, &piece_data)?;
-        self.piece_manager.mark_piece_downloaded(piece_index);
+        Self::write_piece(file, piece_manager, piece_index, &piece_data).await?;
+
+        let mut piece_manager = piece_manager.lock().await;
+        piece_manager.mark_piece_downloaded(piece_index);
 
         let have_message = PeerMessage::Have(piece_index as u32);
         send_message(stream, have_message).await?;
 
-        println!("Successfully downloaded piece {}", piece_index);
         Ok(())
     }
 
     async fn request_piece(
-        &mut self,
         stream: &mut TcpStream,
         piece_index: usize,
         begin: usize,
@@ -206,11 +301,18 @@ impl TorrentState {
         Ok(())
     }
 
-    fn write_piece(&mut self, piece_index: usize, data: &[u8]) -> io::Result<()> {
-        let offset = piece_index * self.piece_manager.piece_size();
-        self.file.seek(SeekFrom::Start(offset as u64))?;
-        self.file.write_all(data)?;
-        self.file.flush()?;
+    async fn write_piece(
+        file: &Arc<Mutex<File>>,
+        piece_manager: &Arc<Mutex<PieceManager>>,
+        piece_index: usize,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let mut file = file.lock().await;
+        let piece_manager = piece_manager.lock().await;
+        let offset = piece_index * piece_manager.piece_size();
+        file.seek(SeekFrom::Start(offset as u64))?;
+        file.write_all(data)?;
+        file.flush()?;
         Ok(())
     }
 }

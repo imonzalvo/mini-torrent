@@ -84,7 +84,7 @@ pub async fn send_handshake(
     let handshake = Handshake::new(info_hash, peer_id);
     let serialized_handshake = handshake.serialize();
     stream.write_all(&serialized_handshake).await?;
-    println!("Handshake sent: {:?}", handshake);
+    println!("Handshake sent: {:?}", handshake.peer_id);
     Ok(())
 }
 
@@ -100,7 +100,7 @@ pub async fn receive_handshake(
         .map_err(|e| e.to_string())?;
 
     let handshake = Handshake::deserialize(&buf)?;
-    println!("Received handshake: {:?}", handshake);
+    println!("Received handshake: {:?}", handshake.peer_id);
 
     // Validate the info_hash
     if handshake.info_hash != expected_info_hash {

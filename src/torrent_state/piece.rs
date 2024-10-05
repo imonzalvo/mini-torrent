@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use sha1::{Digest, Sha1};
 
 use super::errors::TorrentError;
@@ -30,7 +32,7 @@ impl Piece {
 
 pub struct PieceManager {
     pieces: Vec<Piece>,
-    downloaded_pieces: Vec<bool>,
+    downloaded_pieces: Vec<AtomicBool>,
     piece_size: usize,
 }
 
@@ -46,8 +48,6 @@ impl PieceManager {
             .enumerate()
             .map(|(index, hash)| {
                 let size = if index == piece_count - 1 {
-                    // Handle last piece size
-                    // piece_size // This should be adjusted based on total file size
                     (total_length as usize) - (index * piece_size)
                 } else {
                     piece_size
@@ -58,7 +58,7 @@ impl PieceManager {
 
         Self {
             pieces,
-            downloaded_pieces: vec![false; piece_count],
+            downloaded_pieces: (0..piece_count).map(|_| AtomicBool::new(false)).collect(),
             piece_size,
         }
     }
@@ -87,30 +87,49 @@ impl PieceManager {
         result.as_slice() == piece.hash
     }
 
-    pub fn mark_piece_downloaded(&mut self, piece_index: usize) {
+    pub fn mark_piece_downloaded(&self, piece_index: usize) {
         if piece_index < self.downloaded_pieces.len() {
-            self.downloaded_pieces[piece_index] = true;
+            self.downloaded_pieces[piece_index].store(true, Ordering::Release);
+        }
+    }
+
+    pub fn all_pieces_downloaded(&self) -> bool {
+        self.downloaded_pieces
+            .iter()
+            .all(|piece| piece.load(Ordering::Acquire))
+    }
+
+    pub fn mark_piece_not_downloaded(&self, piece_index: usize) {
+        if piece_index < self.downloaded_pieces.len() {
+            self.downloaded_pieces[piece_index].store(false, Ordering::Release);
         }
     }
 
     pub fn is_piece_downloaded(&self, piece_index: usize) -> bool {
         self.downloaded_pieces
             .get(piece_index)
-            .copied()
-            .unwrap_or(false)
+            .map_or(false, |piece| piece.load(Ordering::Acquire))
     }
 
     pub fn get_missing_piece(&self) -> Option<usize> {
         self.downloaded_pieces
             .iter()
-            .position(|&have_piece| !have_piece)
+            .enumerate()
+            .find(|(_, piece)| !piece.load(Ordering::Acquire))
+            .map(|(index, _)| index)
     }
 
     pub fn print_downloaded_pieces(&self) {
         let pieces: String = self
             .downloaded_pieces
             .iter()
-            .map(|&downloaded| if downloaded { '1' } else { '0' })
+            .map(|piece| {
+                if piece.load(Ordering::Acquire) {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
             .collect();
         println!("[{}]", pieces);
     }
