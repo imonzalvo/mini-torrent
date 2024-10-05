@@ -139,6 +139,7 @@ pub async fn send_message(stream: &mut TcpStream, message: PeerMessage) -> io::R
 
 // Function to read a message from a peer
 pub async fn read_message(stream: &mut TcpStream) -> Result<PeerMessage, String> {
+
     // First, read the length prefix (4 bytes)
     let mut length_prefix_buf = [0u8; 4];
     stream

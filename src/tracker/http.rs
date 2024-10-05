@@ -1,7 +1,7 @@
 use std::{error::Error, net::Ipv4Addr, str::FromStr};
 
 use super::{Tracker, TrackerInfo};
-use crate::{bencode_parser::{parse_bencode, BencodeValue}, torrent_file::TorrentFile, tracker::generate_peer_id, Peer};
+use crate::{bencode_parser::{parse_bencode, BencodeValue}, torrent_file::TorrentFile, torrent_state::peer::Peer, tracker::generate_peer_id};
 use async_trait::async_trait;
 use reqwest::Client;
 

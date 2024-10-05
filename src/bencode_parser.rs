@@ -208,8 +208,6 @@ mod tests {
         let (decoded, _) = parse_bencode(value).unwrap();
         let encoded = bencode_encode(&decoded);
         
-        println!("Value: {:?}", value);
-        println!("Encoded: {:?}", encoded);
         assert_eq!(encoded, value);
     }
 }

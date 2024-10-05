@@ -2,10 +2,11 @@ pub mod factory;
 mod http;
 mod udp;
 
-use crate::{Peer};
 use async_trait::async_trait;
 use rand::Rng;
 use std::error::Error;
+
+use crate::torrent_state::peer::Peer;
 
 #[async_trait]
 pub trait Tracker {
@@ -19,7 +20,7 @@ pub struct TrackerInfo {
     pub interval: i64,
 }
 
-fn generate_peer_id() -> [u8; 20] {
+pub fn generate_peer_id() -> [u8; 20] {
     let mut rng = rand::thread_rng();
     let mut bytes = [0u8; 20];
     rng.fill(&mut bytes);

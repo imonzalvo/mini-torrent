@@ -1,7 +1,7 @@
 use std::{error::Error, net::Ipv4Addr};
 
 use super::{Tracker, TrackerInfo};
-use crate::{torrent_file::TorrentFile, tracker::generate_peer_id, Peer};
+use crate::{torrent_file::TorrentFile, torrent_state::peer::Peer, tracker::generate_peer_id};
 use async_trait::async_trait;
 use rand::Rng;
 use tokio::net::UdpSocket;
