@@ -48,7 +48,33 @@ impl<'a> Tracker for UdpTracker<'a> {
         let mut response = vec![0u8; 1024];
         let size = socket.recv(&mut response).await?;
 
-        parse_udp_response(&response[..size])
+        self.parse_tracker_response(&response[..size])
+    }
+
+    fn parse_tracker_response(&self, response: &[u8]) -> Result<TrackerInfo, Box<dyn std::error::Error>> {
+        if response.len() < 20 {
+            return Err("UDP response too short".into());
+        }
+    
+        let action = u32::from_be_bytes([response[0], response[1], response[2], response[3]]);
+        if action != 1 {
+            return Err("Invalid action in announce response".into());
+        }
+    
+        let interval = u32::from_be_bytes([response[8], response[9], response[10], response[11]]);
+    
+        let peers = response[20..]
+            .chunks(6)
+            .map(|chunk| Peer {
+                ip: Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
+                port: u16::from_be_bytes([chunk[4], chunk[5]]),
+            })
+            .collect();
+    
+        Ok(TrackerInfo {
+            peers,
+            interval: interval as i64,
+        })
     }
 }
 
@@ -91,32 +117,6 @@ async fn send_connection_request(socket: &UdpSocket) -> Result<u64, Box<dyn std:
         response[14],
         response[15],
     ]))
-}
-
-fn parse_udp_response(response: &[u8]) -> Result<TrackerInfo, Box<dyn std::error::Error>> {
-    if response.len() < 20 {
-        return Err("UDP response too short".into());
-    }
-
-    let action = u32::from_be_bytes([response[0], response[1], response[2], response[3]]);
-    if action != 1 {
-        return Err("Invalid action in announce response".into());
-    }
-
-    let interval = u32::from_be_bytes([response[8], response[9], response[10], response[11]]);
-
-    let peers = response[20..]
-        .chunks(6)
-        .map(|chunk| Peer {
-            ip: Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
-            port: u16::from_be_bytes([chunk[4], chunk[5]]),
-        })
-        .collect();
-
-    Ok(TrackerInfo {
-        peers,
-        interval: interval as i64,
-    })
 }
 
 fn create_announce_request(

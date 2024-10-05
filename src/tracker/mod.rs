@@ -13,6 +13,8 @@ pub trait Tracker {
     async fn get_peers(
         &self
     ) -> Result<TrackerInfo, Box<dyn Error>>;
+
+    fn parse_tracker_response(&self, response: &[u8]) -> Result<TrackerInfo, Box<dyn std::error::Error>>;
 }
 
 pub struct TrackerInfo {

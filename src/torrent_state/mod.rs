@@ -174,7 +174,6 @@ impl TorrentState {
             {
                 Ok(()) => {
                     let piece_managed_locked = piece_manager.lock().await;
-                    // piece_manager.mark_piece_downloaded(missing_piece_index);
                     tx.send(())
                         .await
                         .expect("Failed to send piece completion signal");
