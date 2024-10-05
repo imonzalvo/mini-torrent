@@ -34,6 +34,12 @@ pub enum TorrentError {
 
     #[error("Message error: {0}")]
     MessageError(String),
+
+    #[error("Piece not available for peer: {0}")]
+    PieceNotAvailable(usize),
+
+    #[error("Peer choking")]
+    PeerChoking
 }
 
 impl From<String> for TorrentError {

@@ -5,7 +5,7 @@ mod piece;
 use futures::future::join_all;
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +27,7 @@ pub struct TorrentState {
     file: Arc<Mutex<File>>,
     info_hash: [u8; 20],
     download_complete: Arc<AtomicBool>,
+    peer_states: Arc<Mutex<Vec<PeerState>>>,
 }
 
 impl TorrentState {
@@ -51,6 +52,7 @@ impl TorrentState {
             file: Arc::new(Mutex::new(file)),
             info_hash,
             download_complete: Arc::new(AtomicBool::new(false)),
+            peer_states: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -64,6 +66,7 @@ impl TorrentState {
                 let file = Arc::clone(&self.file);
                 let info_hash = self.info_hash;
                 let download_complete = Arc::clone(&self.download_complete);
+                let peer_states = Arc::clone(&self.peer_states);
                 let tx = tx.clone();
 
                 task::spawn(async move {
@@ -74,6 +77,7 @@ impl TorrentState {
                         file,
                         info_hash,
                         download_complete,
+                        peer_states,
                         tx,
                     )
                     .await
@@ -127,6 +131,7 @@ impl TorrentState {
         file: Arc<Mutex<File>>,
         info_hash: [u8; 20],
         download_complete: Arc<AtomicBool>,
+        peer_states: Arc<Mutex<Vec<PeerState>>>,
         tx: mpsc::Sender<()>,
     ) -> Result<(), TorrentError> {
         let mut stream = match Self::connect_to_peer(&peer, Duration::from_secs(3)).await {
@@ -143,11 +148,25 @@ impl TorrentState {
         send_handshake(&mut stream, info_hash, peer_id).await?;
         receive_handshake(&mut stream, info_hash).await?;
 
+        // Initialize peer state
+        let peer_state = PeerState::new(peer);
+        let peer_state_index = {
+            let mut peer_states = peer_states.lock().await;
+            peer_states.push(peer_state);
+            peer_states.len() - 1
+        };
+
         send_message(&mut stream, PeerMessage::Unchoke).await?;
         send_message(&mut stream, PeerMessage::Interested).await?;
 
-        Self::handle_initial_messages(&mut stream).await?;
+        let piece_count = {
+            let piece_manager = piece_manager.lock().await;
+            piece_manager.total_pieces()
+        };
 
+        Self::handle_initial_messages(&mut stream, &peer_states, peer_state_index, piece_count)
+            .await?;
+        let mut first = true;
         loop {
             if download_complete.load(Ordering::Relaxed) {
                 println!(
@@ -159,18 +178,38 @@ impl TorrentState {
 
             let missing_piece_index = {
                 let piece_manager = piece_manager.lock().await;
-                let piece = piece_manager.get_missing_piece();
-                if piece.is_none() {
-                    println!("No more pieces to download from peer {}", peer);
+                let piece_index = piece_manager.get_missing_piece();
+
+                if piece_index.is_none() {
+                    println!("All pieces downloaded");
                     break;
                 }
-                piece_manager.mark_piece_downloaded(piece.unwrap());
-                println!("Inside lock: Missing piece: {:?}", piece);
-                piece.unwrap()
+                piece_manager.mark_piece_downloaded(piece_index.unwrap());
+                piece_index.unwrap()
             };
 
-            match Self::download_piece(&mut stream, missing_piece_index, &piece_manager, &file)
-                .await
+            let has_piece_peer = {
+                let peer_states = peer_states.lock().await;
+                let peer_state = &peer_states[peer_state_index];
+
+                peer_state.has_piece(missing_piece_index)
+            };
+
+            if !has_piece_peer {
+                let piece_manager = piece_manager.lock().await;
+                piece_manager.mark_piece_not_downloaded(missing_piece_index);
+                continue;
+            }
+
+            match Self::download_piece(
+                &mut stream,
+                missing_piece_index,
+                &piece_manager,
+                &file,
+                &peer_states,
+                peer_state_index,
+            )
+            .await
             {
                 Ok(()) => {
                     let piece_managed_locked = piece_manager.lock().await;
@@ -202,15 +241,37 @@ impl TorrentState {
         piece_manager.all_pieces_downloaded()
     }
 
-    async fn handle_initial_messages(stream: &mut TcpStream) -> Result<(), TorrentError> {
+    async fn handle_initial_messages(
+        stream: &mut TcpStream,
+        peer_states: &Mutex<Vec<PeerState>>,
+        peer_state_index: usize,
+        piece_count: usize, // Add this parameter
+    ) -> Result<(), TorrentError> {
+        let mut bitfield_message_received = false;
+        let mut unchoke_message_received = false;
         loop {
             match read_message(stream).await? {
                 PeerMessage::Unchoke => {
-                    println!("Peer has unchoked us. We can now request pieces.");
-                    break;
+                    println!(
+                        "{:?} Peer has unchoked us. We can now request pieces.",
+                        peer_state_index
+                    );
+                    let mut peer_states = peer_states.lock().await;
+                    peer_states[peer_state_index].set_peer_choking(false);
+                    unchoke_message_received = true;
+
+                    if bitfield_message_received {
+                        break;
+                    };
                 }
-                PeerMessage::Bitfield(_) => {
-                    // We're not using the bitfield for now, but we could store it if needed
+                PeerMessage::Bitfield(bitfield) => {
+                    println!("{:?} Bitfield received", peer_state_index);
+                    let mut peer_states = peer_states.lock().await;
+                    peer_states[peer_state_index].update_bitfield(bitfield, piece_count);
+                    bitfield_message_received = true;
+                    if unchoke_message_received {
+                        break;
+                    }
                 }
                 _ => {} // Ignore other messages for now
             }
@@ -223,7 +284,17 @@ impl TorrentState {
         piece_index: usize,
         piece_manager: &Arc<Mutex<PieceManager>>,
         file: &Arc<Mutex<File>>,
+        peer_states: &Mutex<Vec<PeerState>>,
+        peer_state_index: usize,
     ) -> Result<(), TorrentError> {
+        {
+            let peer_states = peer_states.lock().await;
+            let peer_state = &peer_states[peer_state_index];
+
+            if peer_state.peer_choking {
+                return Err(TorrentError::PeerChoking);
+            }
+        }
         let (piece_size, num_blocks) = {
             let piece_manager = piece_manager.lock().await;
             let piece = piece_manager.get_piece(piece_index)?;

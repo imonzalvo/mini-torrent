@@ -16,10 +16,10 @@ impl std::fmt::Display for Peer {
 pub struct PeerState {
     pub peer: Peer,
     has_handshake: bool,
-    bitfield: Vec<bool>,
+    pub bitfield: Vec<bool>,
     am_choking: bool,
     am_interested: bool,
-    peer_choking: bool,
+    pub peer_choking: bool,
     peer_interested: bool,
 }
 
@@ -44,9 +44,11 @@ impl PeerState {
                 bitfield.get(byte).map_or(false, |&b| (b >> bit) & 1 == 1)
             })
             .collect();
+        // println!("Updated bitfield: {:?}", self.bitfield);
     }
 
     pub fn has_piece(&self, piece_index: usize) -> bool {
+        // println!("Piece: {:?} - Bitfield {:?}", piece_index, self.bitfield);
         self.bitfield.get(piece_index).copied().unwrap_or(false)
     }
 
@@ -57,4 +59,5 @@ impl PeerState {
     pub fn set_peer_choking(&mut self, value: bool) {
         self.peer_choking = value;
     }
+
 }
