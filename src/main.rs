@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{}", torrent_file);
 
-    let mut torrent_state = TorrentState::new(
+    let torrent_state = TorrentState::new(
         torrent_file.get_piece_count(),
         torrent_file.info.piece_length as usize,
         output_path,

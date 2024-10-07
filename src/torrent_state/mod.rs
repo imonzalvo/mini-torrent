@@ -15,7 +15,7 @@ use peer::{Peer, PeerState};
 use piece::PieceManager;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
-use tokio::task;
+use tokio::task::{self, JoinHandle};
 use tokio::time::{interval, timeout};
 
 use crate::handshake::{receive_handshake, send_handshake};
@@ -58,8 +58,22 @@ impl TorrentState {
 
     pub async fn connect_and_download(&self, peers: Vec<Peer>) -> Result<(), TorrentError> {
         let (tx, mut rx) = mpsc::channel(100);
+        let handles = self.spawn_peer_tasks(peers, tx).await;
 
-        let handles: Vec<_> = peers
+        self.monitor_download(&mut rx).await;
+
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        Ok(())
+    }
+    async fn spawn_peer_tasks(
+        &self,
+        peers: Vec<Peer>,
+        tx: mpsc::Sender<()>,
+    ) -> Vec<JoinHandle<Result<(), TorrentError>>> {
+        peers
             .into_iter()
             .map(|peer| {
                 let piece_manager = Arc::clone(&self.piece_manager);
@@ -83,8 +97,10 @@ impl TorrentState {
                     .await
                 })
             })
-            .collect();
+            .collect::<Vec<_>>()
+    }
 
+    async fn monitor_download(&self, rx: &mut mpsc::Receiver<()>) {
         let mut interval = interval(Duration::from_secs(1));
         loop {
             tokio::select! {
@@ -101,13 +117,6 @@ impl TorrentState {
                 }
             }
         }
-
-        // Wait for all tasks to complete
-        for handle in handles {
-            let _ = handle.await;
-        }
-
-        Ok(())
     }
 
     async fn connect_to_peer(
@@ -145,16 +154,8 @@ impl TorrentState {
         println!("Successfully connected to peer {}", peer);
         let peer_id = generate_peer_id();
 
-        send_handshake(&mut stream, info_hash, peer_id).await?;
-        receive_handshake(&mut stream, info_hash).await?;
-
-        // Initialize peer state
-        let peer_state = PeerState::new(peer);
-        let peer_state_index = {
-            let mut peer_states = peer_states.lock().await;
-            peer_states.push(peer_state);
-            peer_states.len() - 1
-        };
+        Self::perform_handshake(&mut stream, info_hash, peer_id).await?;
+        let peer_state_index = Self::initialize_peer_state(peer, &peer_states).await;
 
         send_message(&mut stream, PeerMessage::Unchoke).await?;
         send_message(&mut stream, PeerMessage::Interested).await?;
@@ -164,9 +165,51 @@ impl TorrentState {
             piece_manager.total_pieces()
         };
 
-        Self::handle_initial_messages(&mut stream, &peer_states, peer_state_index, piece_count)
-            .await?;
-        let mut first = true;
+        Self::handle_initial_messages(&mut stream, &peer_states, peer_state_index, piece_count).await?;
+
+        Self::download_pieces_loop(
+            &mut stream,
+            piece_manager,
+            file,
+            download_complete,
+            peer_states,
+            peer_state_index,
+            tx,
+            peer,
+        )
+        .await
+    }
+
+    async fn perform_handshake(
+        stream: &mut TcpStream,
+        info_hash: [u8; 20],
+        peer_id: [u8; 20],
+    ) -> Result<(), TorrentError> {
+        send_handshake(stream, info_hash, peer_id).await?;
+        receive_handshake(stream, info_hash).await?;
+        Ok(())
+    }
+
+    async fn initialize_peer_state(
+        peer: Peer,
+        peer_states: &Arc<Mutex<Vec<PeerState>>>,
+    ) -> usize {
+        let peer_state = PeerState::new(peer);
+        let mut peer_states = peer_states.lock().await;
+        peer_states.push(peer_state);
+        peer_states.len() - 1
+    }
+
+    async fn download_pieces_loop(
+        stream: &mut TcpStream,
+        piece_manager: Arc<Mutex<PieceManager>>,
+        file: Arc<Mutex<File>>,
+        download_complete: Arc<AtomicBool>,
+        peer_states: Arc<Mutex<Vec<PeerState>>>,
+        peer_state_index: usize,
+        tx: mpsc::Sender<()>,
+        peer: Peer,
+    ) -> Result<(), TorrentError> {
         loop {
             if download_complete.load(Ordering::Relaxed) {
                 println!(
@@ -188,21 +231,14 @@ impl TorrentState {
                 piece_index.unwrap()
             };
 
-            let has_piece_peer = {
-                let peer_states = peer_states.lock().await;
-                let peer_state = &peer_states[peer_state_index];
-
-                peer_state.has_piece(missing_piece_index)
-            };
-
-            if !has_piece_peer {
+            if !Self::peer_has_piece(&peer_states, peer_state_index, missing_piece_index).await {
                 let piece_manager = piece_manager.lock().await;
                 piece_manager.mark_piece_not_downloaded(missing_piece_index);
                 continue;
             }
 
             match Self::download_piece(
-                &mut stream,
+                stream,
                 missing_piece_index,
                 &piece_manager,
                 &file,
@@ -227,13 +263,22 @@ impl TorrentState {
                         "Error downloading piece {} from peer {}: {}",
                         missing_piece_index, peer, e
                     );
-                    let mut piece_manager = piece_manager.lock().await;
+                    let piece_manager = piece_manager.lock().await;
                     piece_manager.mark_piece_not_downloaded(missing_piece_index);
                 }
             }
         }
-
         Ok(())
+    }
+
+    async fn peer_has_piece(
+        peer_states: &Arc<Mutex<Vec<PeerState>>>,
+        peer_state_index: usize,
+        piece_index: usize,
+    ) -> bool {
+        let peer_states = peer_states.lock().await;
+        let peer_state = &peer_states[peer_state_index];
+        peer_state.has_piece(piece_index)
     }
 
     async fn is_download_complete(&self) -> bool {
@@ -342,7 +387,7 @@ impl TorrentState {
 
         Self::write_piece(file, piece_manager, piece_index, &piece_data).await?;
 
-        let mut piece_manager = piece_manager.lock().await;
+        let piece_manager = piece_manager.lock().await;
         piece_manager.mark_piece_downloaded(piece_index);
 
         let have_message = PeerMessage::Have(piece_index as u32);
